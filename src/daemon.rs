@@ -2056,7 +2056,7 @@ fn commit_has_authorship_log(repo: &Repository, commit_sha: &str) -> bool {
         return true;
     }
 
-    crate::git::refs::get_reference_as_authorship_log_v3(repo, commit_sha).is_ok()
+    crate::git::notes_api::read_authorship_v3(repo, commit_sha).is_ok()
 }
 
 fn rewrite_log_mentions_commit(repo: &Repository, commit_sha: &str) -> Result<bool, GitAiError> {

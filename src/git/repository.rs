@@ -2,7 +2,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
-use crate::git::refs::get_authorship;
+use crate::git::notes_api::read_authorship as get_authorship;
 use crate::git::repo_state::{
     common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
 };

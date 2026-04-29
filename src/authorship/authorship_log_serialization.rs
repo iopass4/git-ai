@@ -325,11 +325,11 @@ impl AuthorshipLog {
                     } else {
                         // Try to find prompt record using git grep
                         let shas =
-                            crate::git::refs::grep_ai_notes(repo, &format!("\"{}\"", &entry.hash))
+                            crate::git::notes_api::search_notes(repo, &format!("\"{}\"", &entry.hash))
                                 .unwrap_or_default();
                         let result = if let Some(latest_sha) = shas.first() {
                             if let Some(authorship_log) =
-                                crate::git::refs::get_authorship(repo, latest_sha)
+                                crate::git::notes_api::read_authorship(repo, latest_sha)
                             {
                                 authorship_log.metadata.prompts.get(&entry.hash).cloned()
                             } else {
