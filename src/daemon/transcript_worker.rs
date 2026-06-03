@@ -217,6 +217,41 @@ impl TranscriptWorker {
 
         tracing::info!(discovered = items.len(), "sweep completed");
 
+        for (i, item) in items.iter().enumerate().take(10) {
+            match item {
+                SweepItem::Session {
+                    session_id,
+                    tool,
+                    canonical_path,
+                    ..
+                } => {
+                    tracing::info!(
+                        index = i,
+                        tool = %tool,
+                        session_id = %session_id,
+                        path = %canonical_path.display(),
+                        "sweep item: session"
+                    );
+                }
+                SweepItem::SharedStream {
+                    tool,
+                    stream_kind,
+                    canonical_path,
+                } => {
+                    tracing::info!(
+                        index = i,
+                        tool = %tool,
+                        stream_kind = %stream_kind,
+                        path = %canonical_path.display(),
+                        "sweep item: shared stream"
+                    );
+                }
+            }
+        }
+        if items.len() > 10 {
+            tracing::info!(remaining = items.len() - 10, "... and more sweep items");
+        }
+
         let mut enqueued_this_sweep: HashSet<(PathBuf, String)> = HashSet::new();
 
         for item in items {
