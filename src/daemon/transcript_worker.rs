@@ -1180,12 +1180,14 @@ mod subagent_sweep_tests {
         // Should have enqueued 2 subagent tasks
         assert_eq!(worker.priority_queue.len(), 2);
 
-        // Both should be in the DB
+        // Both should be in the DB (paths are canonicalized before storage)
         let sub1_sid = generate_session_id("agent-sub1", "claude");
         let sub2_sid = generate_session_id("agent-sub2", "claude");
+        let sub1_canonical = std::fs::canonicalize(&sub1).unwrap();
+        let sub2_canonical = std::fs::canonicalize(&sub2).unwrap();
 
         let rec1 = db
-            .get_session(&sub1_sid, "transcript", &sub1.display().to_string())
+            .get_session(&sub1_sid, "transcript", &sub1_canonical.display().to_string())
             .unwrap()
             .unwrap();
         assert_eq!(rec1.external_session_id, "agent-sub1");
@@ -1193,7 +1195,7 @@ mod subagent_sweep_tests {
         assert_eq!(rec1.tool, "claude");
 
         let rec2 = db
-            .get_session(&sub2_sid, "transcript", &sub2.display().to_string())
+            .get_session(&sub2_sid, "transcript", &sub2_canonical.display().to_string())
             .unwrap()
             .unwrap();
         assert_eq!(rec2.external_session_id, "agent-sub2");
