@@ -588,6 +588,9 @@ impl TranscriptWorker {
         let effective_wm_type = stream.effective_watermark_type(stream_path);
         let initial_watermark = effective_wm_type.create_initial_watermark();
 
+        // For shared streams, external_session_id/parent/repo_work_dir are meaningless
+        // since the resource serves all sessions — use empty/None to avoid stale first-caller data
+        let is_shared = session_id == SHARED_STREAM_SESSION_ID;
         let record = SessionRecord {
             session_id: session_id.to_string(),
             stream_kind: stream.stream_kind.to_string(),
@@ -596,15 +599,27 @@ impl TranscriptWorker {
             transcript_format: format!("{:?}", stream.effective_format(stream_path)),
             watermark_type: format!("{:?}", effective_wm_type),
             watermark_value: initial_watermark.serialize(),
-            external_session_id: external_session_id.unwrap_or("").to_string(),
-            external_parent_session_id: external_parent_session_id.map(|s| s.to_string()),
+            external_session_id: if is_shared {
+                String::new()
+            } else {
+                external_session_id.unwrap_or("").to_string()
+            },
+            external_parent_session_id: if is_shared {
+                None
+            } else {
+                external_parent_session_id.map(|s| s.to_string())
+            },
             first_seen_at: chrono::Utc::now().timestamp(),
             last_processed_at: 0,
             last_known_size: 0,
             last_modified: None,
             processing_errors: 0,
             last_error: None,
-            repo_work_dir: repo_work_dir.map(|p| p.display().to_string()),
+            repo_work_dir: if is_shared {
+                None
+            } else {
+                repo_work_dir.map(|p| p.display().to_string())
+            },
         };
 
         self.transcripts_db.insert_session(&record)
@@ -706,20 +721,33 @@ impl TranscriptWorker {
         let mut current_watermark = watermark_type.deserialize(&session.watermark_value)?;
         let path = PathBuf::from(&session.transcript_path);
         let mut total_events = 0usize;
-        let parent_session_id = session
-            .external_parent_session_id
-            .as_ref()
-            .map(|ext_pid| generate_session_id(ext_pid, &session.tool));
+        let is_shared_stream = session.session_id == SHARED_STREAM_SESSION_ID;
+
+        // For shared streams, parent/repo/external attrs are meaningless since they'd
+        // reflect whichever session first created the record. Per-event overrides handle
+        // session_id and external_session_id; parent_session_id and repo_url are omitted.
+        let parent_session_id = if is_shared_stream {
+            None
+        } else {
+            session
+                .external_parent_session_id
+                .as_ref()
+                .map(|ext_pid| generate_session_id(ext_pid, &session.tool))
+        };
 
         // Resolve repo_work_dir with priority: task (hook) > DB > infer from transcript
-        let resolved_work_dir = task
-            .repo_work_dir
-            .clone()
-            .or_else(|| session.repo_work_dir.as_ref().map(PathBuf::from))
-            .or_else(|| agent.infer_cwd(&path));
+        let resolved_work_dir = if is_shared_stream {
+            task.repo_work_dir.clone()
+        } else {
+            task.repo_work_dir
+                .clone()
+                .or_else(|| session.repo_work_dir.as_ref().map(PathBuf::from))
+                .or_else(|| agent.infer_cwd(&path))
+        };
 
         // Persist inferred cwd to DB if session didn't already have one
-        if session.repo_work_dir.is_none()
+        if !is_shared_stream
+            && session.repo_work_dir.is_none()
             && let Some(ref work_dir) = resolved_work_dir
         {
             let _ = db.update_repo_work_dir(
@@ -732,10 +760,14 @@ impl TranscriptWorker {
 
         let mut base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
             .session_id(session.session_id.clone())
-            .tool(&session.tool)
-            .external_session_id(session.external_session_id.clone())
-            .external_parent_session_id_opt(session.external_parent_session_id.clone())
-            .parent_session_id_opt(parent_session_id);
+            .tool(&session.tool);
+
+        if !is_shared_stream {
+            base_attrs = base_attrs
+                .external_session_id(session.external_session_id.clone())
+                .external_parent_session_id_opt(session.external_parent_session_id.clone())
+                .parent_session_id_opt(parent_session_id);
+        }
 
         if let Some(ref work_dir) = resolved_work_dir
             && let Some(url) = crate::repo_url::resolve_repo_url_from_path(work_dir)
