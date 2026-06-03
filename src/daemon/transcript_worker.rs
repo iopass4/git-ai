@@ -1187,7 +1187,11 @@ mod subagent_sweep_tests {
         let sub2_canonical = std::fs::canonicalize(&sub2).unwrap();
 
         let rec1 = db
-            .get_session(&sub1_sid, "transcript", &sub1_canonical.display().to_string())
+            .get_session(
+                &sub1_sid,
+                "transcript",
+                &sub1_canonical.display().to_string(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(rec1.external_session_id, "agent-sub1");
@@ -1195,7 +1199,11 @@ mod subagent_sweep_tests {
         assert_eq!(rec1.tool, "claude");
 
         let rec2 = db
-            .get_session(&sub2_sid, "transcript", &sub2_canonical.display().to_string())
+            .get_session(
+                &sub2_sid,
+                "transcript",
+                &sub2_canonical.display().to_string(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(rec2.external_session_id, "agent-sub2");
