@@ -346,12 +346,33 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
 # ============================================================
 $isElevated = $false
 try {
-    # Detect actual UAC elevation via mandatory integrity level.
-    # Most Windows users are in the Administrators group but run non-elevated
-    # (Medium integrity S-1-16-8192). We only warn when the process is
-    # actually elevated (High integrity S-1-16-12288), i.e. "Run as Administrator".
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $isElevated = $identity.Groups.Value -contains 'S-1-16-12288'
+    # Detect actual UAC elevation via the Win32 TokenElevation API.
+    # This matches the Rust binary's detection and correctly distinguishes
+    # "Run as Administrator" from a normal admin-group user terminal.
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class GitAiElevation {
+    [DllImport("advapi32.dll", SetLastError=true)]
+    static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    static extern bool GetTokenInformation(IntPtr token, int cls, ref int info, int len, out int ret);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+    public static bool IsElevated() {
+        IntPtr tok;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x0008, out tok)) return false;
+        try {
+            int elev = 0; int sz;
+            if (!GetTokenInformation(tok, 20, ref elev, 4, out sz)) return false;
+            return elev != 0;
+        } finally { CloseHandle(tok); }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+    $isElevated = [GitAiElevation]::IsElevated()
 } catch { }
 
 if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
