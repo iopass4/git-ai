@@ -346,9 +346,13 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
 # ============================================================
 $isElevated = $false
 try {
+    # Detect actual UAC elevation, not just Administrators group membership.
+    # Most Windows users are in the Administrators group but run non-elevated;
+    # we only warn when the process was explicitly "Run as Administrator".
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]$identity
-    $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $adminSid = [Security.Principal.SecurityIdentifier]::new(
+        [Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $isElevated = $identity.Owner -eq $adminSid
 } catch { }
 
 if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
