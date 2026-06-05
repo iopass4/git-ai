@@ -356,7 +356,7 @@ if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
     $isCi = $env:CI -or $env:GITHUB_ACTIONS -or $env:GITLAB_CI -or $env:JENKINS_URL `
         -or $env:BUILDKITE -or $env:CIRCLECI -or $env:CODEBUILD_BUILD_ID `
         -or $env:AGENT_OS -or $env:KUBERNETES_SERVICE_HOST `
-        -or $env:GIT_AI_DAEMON_UPGRADE
+        -or $env:GIT_AI_DAEMON_UPGRADE -or $env:container
 
     if (-not $isCi) {
         Write-Host ''

@@ -182,7 +182,8 @@ if [ "$(id -u)" = "0" ] && [ "${GIT_AI_ALLOW_SUPERUSER:-}" != "1" ]; then
         || [ -n "${JENKINS_URL:-}" ] || [ -n "${BUILDKITE:-}" ] || [ -n "${CIRCLECI:-}" ] \
         || [ -n "${CODEBUILD_BUILD_ID:-}" ] || [ -n "${AGENT_OS:-}" ] \
         || [ -n "${KUBERNETES_SERVICE_HOST:-}" ] || [ -n "${INSTALL_USER:-}" ] \
-        || [ -n "${GIT_AI_DAEMON_UPGRADE:-}" ]; then
+        || [ -n "${GIT_AI_DAEMON_UPGRADE:-}" ] \
+        || [ -n "${container:-}" ] || [ -f "/.dockerenv" ]; then
         IS_CI_OR_MDM=true
     fi
 

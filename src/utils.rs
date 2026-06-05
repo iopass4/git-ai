@@ -246,7 +246,23 @@ pub fn is_superuser_expected_environment() -> bool {
     if std::env::var_os("KUBERNETES_SERVICE_HOST").is_some() {
         return true;
     }
+    if is_inside_container() {
+        return true;
+    }
     if std::env::var_os("GIT_AI_DAEMON_UPGRADE").is_some() {
+        return true;
+    }
+    false
+}
+
+fn is_inside_container() -> bool {
+    // `container` env var is set by podman, systemd-nspawn, and other runtimes
+    if std::env::var_os("container").is_some() {
+        return true;
+    }
+    // Docker creates /.dockerenv in every container
+    #[cfg(unix)]
+    if std::path::Path::new("/.dockerenv").exists() {
         return true;
     }
     false

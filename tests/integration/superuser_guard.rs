@@ -66,6 +66,7 @@ fn remove_all_ci_env_vars(cmd: &mut Command) -> &mut Command {
         .env_remove("AGENT_OS")
         .env_remove("KUBERNETES_SERVICE_HOST")
         .env_remove("GIT_AI_DAEMON_UPGRADE")
+        .env_remove("container")
 }
 
 #[test]
