@@ -20,7 +20,10 @@ namespace GitAiVS
     ///   - Show an info bar if git-ai is not installed
     /// </summary>
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
+    [ProvideAutoLoad(VSConstants.UICONTEXT.NoSolution_string, PackageAutoLoadFlags.BackgroundLoad)]
     [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExists_string, PackageAutoLoadFlags.BackgroundLoad)]
+    [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionHasMultipleProjects_string, PackageAutoLoadFlags.BackgroundLoad)]
+    [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionHasSingleProject_string, PackageAutoLoadFlags.BackgroundLoad)]
     [Guid(PackageGuidString)]
     public sealed class GitAiPackage : AsyncPackage
     {
@@ -33,6 +36,8 @@ namespace GitAiVS
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
+            try
+            {
             await base.InitializeAsync(cancellationToken, progress);
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
 
@@ -56,6 +61,11 @@ namespace GitAiVS
             SubscribeToSaveEvents();
 
             System.Diagnostics.Trace.WriteLine("[git-ai] GitAiPackage initialized successfully.");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[git-ai] FATAL: InitializeAsync failed: {ex}");
+            }
         }
 
         /// <summary>
