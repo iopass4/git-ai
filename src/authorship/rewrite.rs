@@ -41,7 +41,7 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             ref old_tip,
             ref new_tip,
             ref onto,
-        } => handle_non_fast_forward_rewrite(repo, old_tip, new_tip, onto.as_deref()).map(|_| ()),
+        } => handle_non_fast_forward_rewrite(repo, old_tip, new_tip, onto.as_deref()),
         RewriteEvent::CherryPickComplete {
             sources,
             new_commits,
@@ -62,15 +62,15 @@ pub fn handle_non_fast_forward_rewrite(
     old_tip: &str,
     new_tip: &str,
     onto: Option<&str>,
-) -> Result<Vec<(String, String)>, GitAiError> {
+) -> Result<(), GitAiError> {
     let mappings = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto)?;
     if mappings.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas)?;
     shift_authorship_notes_merging_existing(repo, &mappings)?;
-    Ok(mappings)
+    Ok(())
 }
 
 fn handle_squash_merge(
@@ -134,13 +134,7 @@ fn handle_squash_merge(
         {
             return write_authorship_log(repo, squash_commit, existing_log);
         }
-        return post_squash_resolution_working_log(
-            repo,
-            onto,
-            squash_commit,
-            existing_target_log,
-            &sources,
-        );
+        return post_squash_resolution_working_log(repo, onto, squash_commit, existing_target_log);
     }
 
     // Add the final source_head→squash_commit pair
@@ -214,10 +208,8 @@ fn handle_squash_merge(
     let shifted_log = match existing_target_log {
         Some(existing) => {
             crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
-                repo,
                 Some(final_log),
                 existing,
-                &sources,
                 squash_commit,
             )
         }
@@ -225,7 +217,7 @@ fn handle_squash_merge(
     };
 
     if repo.storage.has_working_log(onto) {
-        post_squash_resolution_working_log(repo, onto, squash_commit, Some(shifted_log), &sources)
+        post_squash_resolution_working_log(repo, onto, squash_commit, Some(shifted_log))
     } else {
         write_authorship_log(repo, squash_commit, &shifted_log)
     }
@@ -236,7 +228,6 @@ fn post_squash_resolution_working_log(
     onto: &str,
     squash_commit: &str,
     existing_shifted_log: Option<AuthorshipLog>,
-    sources: &[String],
 ) -> Result<(), GitAiError> {
     if !repo.storage.has_working_log(onto) {
         if let Some(log) = existing_shifted_log {
@@ -245,7 +236,6 @@ fn post_squash_resolution_working_log(
         return Ok(());
     }
 
-    let source_shas = sources.to_vec();
     let commit_for_transform = squash_commit.to_string();
     let author = repo.git_author_identity().formatted_or_unknown();
     crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options(
@@ -260,10 +250,8 @@ fn post_squash_resolution_working_log(
         move |resolution_log| {
             Ok(
                 crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
-                    repo,
                     existing_shifted_log,
                     resolution_log,
-                    &source_shas,
                     &commit_for_transform,
                 ),
             )

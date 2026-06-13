@@ -675,7 +675,6 @@ fn process_conflict_resolution_working_logs(
     repo: &Repository,
     new_tip: &str,
     onto: Option<&str>,
-    source_mappings: &[(String, String)],
 ) -> Result<(), GitAiError> {
     let onto_sha = match onto {
         Some(s) if !s.is_empty() => s,
@@ -691,13 +690,6 @@ fn process_conflict_resolution_working_logs(
     ]);
     let output = crate::git::repository::exec_git(&args)?;
     let log_output = String::from_utf8_lossy(&output.stdout);
-    let mut sources_by_destination: HashMap<String, Vec<String>> = HashMap::new();
-    for (source, destination) in source_mappings {
-        sources_by_destination
-            .entry(destination.clone())
-            .or_default()
-            .push(source.clone());
-    }
 
     let commit_parent_pairs = log_output
         .lines()
@@ -717,17 +709,12 @@ fn process_conflict_resolution_working_logs(
         let existing_shifted_log = existing_notes
             .get(&commit_sha)
             .and_then(|raw| AuthorshipLog::deserialize_from_string(raw).ok());
-        let source_shas = sources_by_destination
-            .get(&commit_sha)
-            .cloned()
-            .unwrap_or_default();
         post_conflict_resolution_working_log(
             repo,
             &parent_sha,
             &commit_sha,
             author.clone(),
             existing_shifted_log,
-            source_shas,
         )?;
     }
     Ok(())
@@ -739,7 +726,6 @@ fn post_conflict_resolution_working_log(
     commit_sha: &str,
     author: String,
     existing_shifted_log: Option<AuthorshipLog>,
-    source_shas: Vec<String>,
 ) -> Result<(), GitAiError> {
     if !repo.storage.has_working_log(parent_sha) {
         return Ok(());
@@ -758,10 +744,8 @@ fn post_conflict_resolution_working_log(
         move |resolution_log| {
             Ok(
                 crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
-                    repo,
                     existing_shifted_log,
                     resolution_log,
-                    &source_shas,
                     &commit_for_transform,
                 ),
             )
@@ -1420,15 +1404,6 @@ fn apply_cherry_pick_complete_rewrite(
         sources,
         new_commits,
     )?;
-    let sources_by_destination: HashMap<String, Vec<String>> =
-        pairs
-            .iter()
-            .fold(HashMap::new(), |mut acc, (source, destination)| {
-                acc.entry(destination.clone())
-                    .or_default()
-                    .push(source.clone());
-                acc
-            });
     if !pairs.is_empty() {
         let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
         crate::authorship::rewrite::handle_rewrite_event(
@@ -1447,17 +1422,12 @@ fn apply_cherry_pick_complete_rewrite(
         let existing_shifted_log = existing_notes
             .get(commit_sha)
             .and_then(|raw| AuthorshipLog::deserialize_from_string(raw).ok());
-        let source_shas = sources_by_destination
-            .get(commit_sha)
-            .cloned()
-            .unwrap_or_default();
         post_conflict_resolution_working_log(
             repo,
             &parent,
             commit_sha,
             author.clone(),
             existing_shifted_log,
-            source_shas,
         )?;
         parent = commit_sha.clone();
     }
@@ -4044,7 +4014,7 @@ impl ActorDaemonCoordinator {
                             && is_ancestor_commit(&repo, onto, &new_tip)
                     })
                     .or(command_rebase_onto);
-                let mappings = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite(
                     &repo,
                     &original_head,
                     &new_tip,
@@ -4056,7 +4026,6 @@ impl ActorDaemonCoordinator {
                     &repo,
                     &new_tip,
                     conflict_base.as_deref(),
-                    &mappings,
                 )?;
             }
             return Ok(());
@@ -4077,7 +4046,7 @@ impl ActorDaemonCoordinator {
             } else {
                 onto_hint.clone()
             };
-            let mappings = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
+            crate::authorship::rewrite::handle_non_fast_forward_rewrite(
                 &repo,
                 old_tip,
                 new_tip,
@@ -4086,12 +4055,7 @@ impl ActorDaemonCoordinator {
             repo.storage.rename_working_log(old_tip, new_tip)?;
             if is_rebase_cmd {
                 let conflict_base = rewrite_onto.clone().or_else(|| onto_hint.clone());
-                process_conflict_resolution_working_logs(
-                    &repo,
-                    new_tip,
-                    conflict_base.as_deref(),
-                    &mappings,
-                )?;
+                process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref())?;
             }
         }
 
@@ -6670,7 +6634,7 @@ mod tests {
 
         let repo = crate::git::find_repository_in_path(repo_path.to_str().unwrap())
             .expect("find test repository");
-        let result = process_conflict_resolution_working_logs(&repo, &new_tip, Some(&onto), &[]);
+        let result = process_conflict_resolution_working_logs(&repo, &new_tip, Some(&onto));
         assert!(
             result.is_err(),
             "corrupt destination notes must fail closed instead of being treated as absent"

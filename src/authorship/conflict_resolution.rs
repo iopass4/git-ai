@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::authorship::authorship_log::LineRange;
-use crate::authorship::authorship_log_serialization::{AttestationEntry, AuthorshipLog};
-use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
-use crate::git::repository::Repository;
+use crate::authorship::authorship_log_serialization::AuthorshipLog;
 
 fn normalize_line_ranges(ranges: &[LineRange]) -> Vec<LineRange> {
     let mut lines: Vec<u32> = ranges.iter().flat_map(LineRange::expand).collect();
@@ -145,121 +143,12 @@ fn merge_authorship_metadata(target: &mut AuthorshipLog, source: &AuthorshipLog)
     }
 }
 
-fn equal_line_mapping_between_commits(
-    repo: &Repository,
-    source_sha: &str,
-    destination_sha: &str,
-    file_path: &str,
-) -> Option<HashMap<u32, u32>> {
-    let source_content =
-        String::from_utf8(repo.get_file_content(file_path, source_sha).ok()?).ok()?;
-    let destination_content =
-        String::from_utf8(repo.get_file_content(file_path, destination_sha).ok()?).ok()?;
-    let source_lines: Vec<String> = source_content.lines().map(str::to_string).collect();
-    let destination_lines: Vec<String> = destination_content.lines().map(str::to_string).collect();
-    let diff_ops = capture_diff_slices(&source_lines, &destination_lines);
-
-    let mut mapping = HashMap::new();
-    for op in diff_ops {
-        if let DiffOp::Equal {
-            old_index,
-            new_index,
-            len,
-        } = op
-        {
-            for offset in 0..len {
-                mapping.insert(
-                    (old_index + offset + 1) as u32,
-                    (new_index + offset + 1) as u32,
-                );
-            }
-        }
-    }
-    Some(mapping)
-}
-
-fn recover_exact_source_lines_from_mapping(
-    repo: &Repository,
-    target: &mut AuthorshipLog,
-    source_sha: &str,
-    destination_sha: &str,
-) {
-    let Some(source_raw) = crate::git::notes_api::read_note(repo, source_sha) else {
-        return;
-    };
-    let Ok(source_log) = AuthorshipLog::deserialize_from_string(&source_raw) else {
-        return;
-    };
-
-    let mut recovered_log = AuthorshipLog::new();
-    recovered_log.metadata = source_log.metadata.clone();
-    let mut target_coverage = line_coverage_by_file(target);
-
-    for source_attestation in &source_log.attestations {
-        let Some(line_mapping) = equal_line_mapping_between_commits(
-            repo,
-            source_sha,
-            destination_sha,
-            &source_attestation.file_path,
-        ) else {
-            continue;
-        };
-
-        for source_entry in &source_attestation.entries {
-            let mut mapped_lines = Vec::new();
-            for source_line in source_entry.line_ranges.iter().flat_map(LineRange::expand) {
-                if let Some(destination_line) = line_mapping.get(&source_line) {
-                    mapped_lines.push(*destination_line);
-                }
-            }
-
-            if mapped_lines.is_empty() {
-                continue;
-            }
-
-            mapped_lines.sort_unstable();
-            mapped_lines.dedup();
-            let mapped_ranges = LineRange::compress_lines(&mapped_lines);
-            let current_coverage = target_coverage
-                .get(&source_attestation.file_path)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let missing_ranges = subtract_line_ranges(&mapped_ranges, current_coverage);
-            if missing_ranges.is_empty() {
-                continue;
-            }
-
-            target_coverage
-                .entry(source_attestation.file_path.clone())
-                .or_default()
-                .extend(missing_ranges.clone());
-            let file = recovered_log.get_or_create_file(&source_attestation.file_path);
-            file.add_entry(AttestationEntry::new(
-                source_entry.hash.clone(),
-                missing_ranges,
-            ));
-        }
-    }
-
-    recovered_log
-        .attestations
-        .retain(|attestation| !attestation.entries.is_empty());
-    retain_referenced_metadata(&mut recovered_log);
-    merge_file_attestations(target, &recovered_log);
-    merge_authorship_metadata(target, &recovered_log);
-}
-
 pub fn merge_conflict_resolution_authorship(
-    repo: &Repository,
     existing_shifted_log: Option<AuthorshipLog>,
     resolution_log: AuthorshipLog,
-    source_shas: &[String],
     commit_sha: &str,
 ) -> AuthorshipLog {
     let mut merged = existing_shifted_log.unwrap_or_default();
-    for source_sha in source_shas {
-        recover_exact_source_lines_from_mapping(repo, &mut merged, source_sha, commit_sha);
-    }
     let resolution_log = filter_resolution_log_to_uncovered_lines(resolution_log, &merged);
 
     merge_file_attestations(&mut merged, &resolution_log);
