@@ -46,6 +46,7 @@ use interprocess::{
 use named_pipe::{
     ConnectingServer as WindowsConnectingServer, OpenMode as WindowsPipeOpenMode,
     PipeClient as WindowsPipeClient, PipeOptions as WindowsPipeOptions,
+    PipeServer as WindowsPipeServer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -7866,6 +7867,7 @@ fn control_listener_loop_actor(
     #[cfg(windows)]
     {
         let mut workers = Vec::new();
+        let worker_count = windows_control_pipe_worker_count();
         let first_connecting = windows_pipe_connecting_server(&control_socket_path, true)?;
         {
             let path = control_socket_path.clone();
@@ -7881,7 +7883,7 @@ fn control_listener_loop_actor(
                 result
             }));
         }
-        for _ in 1..WINDOWS_CONTROL_PIPE_WORKERS {
+        for _ in 1..worker_count {
             let path = control_socket_path.clone();
             let coord = coordinator.clone();
             let handle = runtime_handle.clone();
@@ -7901,7 +7903,7 @@ fn control_listener_loop_actor(
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        wake_windows_pipe_workers(&control_socket_path, WINDOWS_CONTROL_PIPE_WORKERS);
+        wake_windows_pipe_workers(&control_socket_path, worker_count);
 
         for worker in workers {
             let result = worker
@@ -7933,6 +7935,19 @@ fn windows_pipe_connecting_server(
 }
 
 #[cfg(windows)]
+fn windows_control_pipe_worker_count() -> usize {
+    #[cfg(feature = "test-support")]
+    if let Ok(raw) = std::env::var("GIT_AI_TEST_WINDOWS_CONTROL_PIPE_WORKERS")
+        && let Ok(count) = raw.parse::<usize>()
+        && count > 0
+    {
+        return count;
+    }
+
+    WINDOWS_CONTROL_PIPE_WORKERS
+}
+
+#[cfg(windows)]
 fn wake_windows_pipe_workers(pipe_path: &Path, worker_count: usize) {
     for _ in 0..worker_count {
         let _ = WindowsPipeClient::connect_ms(pipe_path.as_os_str(), 100);
@@ -7947,7 +7962,7 @@ fn windows_control_pipe_worker_loop(
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     loop {
-        let mut server = connecting.wait().map_err(|e| {
+        let server = connecting.wait().map_err(|e| {
             GitAiError::Generic(format!(
                 "failed accepting control pipe {}: {}",
                 control_socket_path.display(),
@@ -7960,27 +7975,37 @@ fn windows_control_pipe_worker_loop(
             break;
         }
 
-        {
-            let mut reader = BufReader::new(&mut server);
-            if let Err(e) = handle_control_connection_actor_reader(
-                &mut reader,
-                coordinator.clone(),
-                runtime_handle.clone(),
-            ) {
-                tracing::debug!(%e, "control connection error");
-            }
-        }
+        connecting = windows_pipe_connecting_server(&control_socket_path, false)?;
 
-        connecting = server.disconnect().map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed recycling control pipe {}: {}",
-                control_socket_path.display(),
-                e
-            ))
-        })?;
+        let coord = coordinator.clone();
+        let handle = runtime_handle.clone();
+        std::thread::Builder::new()
+            .spawn(move || {
+                handle_windows_control_pipe_connection(server, coord, handle);
+            })
+            .map_err(|e| {
+                GitAiError::Generic(format!(
+                    "failed spawning control pipe handler for {}: {}",
+                    control_socket_path.display(),
+                    e
+                ))
+            })?;
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn handle_windows_control_pipe_connection(
+    mut server: WindowsPipeServer,
+    coordinator: Arc<ActorDaemonCoordinator>,
+    runtime_handle: tokio::runtime::Handle,
+) {
+    let mut reader = BufReader::new(&mut server);
+    if let Err(e) = handle_control_connection_actor_reader(&mut reader, coordinator, runtime_handle)
+    {
+        tracing::debug!(%e, "control connection error");
+    }
 }
 
 #[cfg(not(windows))]
