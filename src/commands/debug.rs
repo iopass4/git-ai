@@ -743,7 +743,9 @@ fn format_wait_capture_error(command: &str, output: TimedCommandOutput) -> Strin
 
 fn append_debug_diagnostics(message: &mut String, diagnostics: &[String]) {
     for diagnostic in diagnostics {
-        message.push_str("; ");
+        if !message.is_empty() {
+            message.push_str("; ");
+        }
         message.push_str(diagnostic);
     }
 }
@@ -1325,5 +1327,20 @@ mod tests {
         );
         assert!(err.contains("stdout before timeout: out"), "{err}");
         assert!(err.contains("stderr before timeout: err"), "{err}");
+    }
+
+    #[test]
+    fn test_command_output_to_result_formats_diagnostics_without_stderr() {
+        let err = command_output_to_result(TimedCommandOutput {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            diagnostics: vec!["output collection did not finish".to_string()],
+            wait_error: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "exit code 1: output collection did not finish");
     }
 }

@@ -251,12 +251,18 @@ fn drain_output_events(rx: &Receiver<OutputEvent>, output: &mut OutputState) {
             OutputEvent::Stderr(bytes) => output.stderr.extend(bytes),
             OutputEvent::StdoutDone => output.stdout_done = true,
             OutputEvent::StderrDone => output.stderr_done = true,
-            OutputEvent::StdoutError(err) => output
-                .diagnostics
-                .push(format!("failed to read stdout: {}", err)),
-            OutputEvent::StderrError(err) => output
-                .diagnostics
-                .push(format!("failed to read stderr: {}", err)),
+            OutputEvent::StdoutError(err) => {
+                output
+                    .diagnostics
+                    .push(format!("failed to read stdout: {}", err));
+                output.stdout_done = true;
+            }
+            OutputEvent::StderrError(err) => {
+                output
+                    .diagnostics
+                    .push(format!("failed to read stderr: {}", err));
+                output.stderr_done = true;
+            }
         }
     }
 }
