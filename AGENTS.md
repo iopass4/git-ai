@@ -211,7 +211,7 @@ Uses `insta` crate. Snapshots live in `tests/integration/snapshots/` and `tests/
 - **`GIT_AI_DEBUG_PERFORMANCE=1`** (or `=2` for JSON) enables performance timing output.
 - **Paths are POSIX-normalized**: `normalize_to_posix()` utility converts Windows backslashes. File paths in authorship logs and working logs always use forward slashes.
 - **`GIT_AI_VERSION` constant** changes between debug/release/test modes via `cfg` attributes in `authorship_log_serialization.rs`.
-- **Cross-platform**: `#[cfg(unix)]` / `#[cfg(windows)]` conditional compilation is used throughout for signal handling, process creation flags (`CREATE_NO_WINDOW`), path handling, and terminal detection. 63 `#[cfg(windows)]` annotations exist across 17 files.
+- **Cross-platform**: `#[cfg(unix)]` / `#[cfg(windows)]` conditional compilation is used extensively (well over a hundred `#[cfg(windows)]` annotations across ~two dozen files) for signal handling, process creation flags (`CREATE_NO_WINDOW`), path handling, terminal detection, and named-pipe vs unix-socket transport (e.g. the daemon control/trace sockets are named pipes on Windows, so `Path::exists()` checks are gated to non-Windows).
 
 ## Gotchas
 
