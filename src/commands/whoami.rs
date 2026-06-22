@@ -77,7 +77,7 @@ fn render_whoami(
     .unwrap();
     writeln!(
         out,
-        "  Author identity header (X-Author-Identity): {}",
+        "  Identity: {}",
         author_identity_header_status(api_ctx)
     )
     .unwrap();
@@ -110,36 +110,38 @@ fn render_whoami(
     }
     writeln!(out).unwrap();
 
-    writeln!(out, "Login identity").unwrap();
-    writeln!(out, "  User ID: {}", optional_or_unavailable(&auth.user_id)).unwrap();
-    writeln!(out, "  Email: {}", optional_or_unavailable(&auth.email)).unwrap();
-    writeln!(out, "  Name: {}", optional_or_unavailable(&auth.name)).unwrap();
-    writeln!(
-        out,
-        "  Personal org ID: {}",
-        optional_or_unavailable(&auth.personal_org_id)
-    )
-    .unwrap();
-    if auth.orgs.is_empty() {
-        writeln!(out, "  Organizations: <none>").unwrap();
-    } else {
-        writeln!(out, "  Organizations:").unwrap();
-        for org in &auth.orgs {
-            let org_id = org.org_id.as_deref().unwrap_or("<unknown-id>");
-            let org_slug = org.org_slug.as_deref().unwrap_or("<unknown-slug>");
-            let org_name = org.org_name.as_deref().unwrap_or("<unknown-name>");
-            let role = org.role.as_deref().unwrap_or("<unknown-role>");
-            writeln!(
-                out,
-                "    - {} ({}) [{}] role={}",
-                org_slug, org_name, org_id, role
-            )
-            .unwrap();
+    if matches!(auth.state, AuthState::LoggedIn) {
+        writeln!(out, "Login identity").unwrap();
+        writeln!(out, "  User ID: {}", optional_or_unavailable(&auth.user_id)).unwrap();
+        writeln!(out, "  Email: {}", optional_or_unavailable(&auth.email)).unwrap();
+        writeln!(out, "  Name: {}", optional_or_unavailable(&auth.name)).unwrap();
+        writeln!(
+            out,
+            "  Personal org ID: {}",
+            optional_or_unavailable(&auth.personal_org_id)
+        )
+        .unwrap();
+        if auth.orgs.is_empty() {
+            writeln!(out, "  Organizations: <none>").unwrap();
+        } else {
+            writeln!(out, "  Organizations:").unwrap();
+            for org in &auth.orgs {
+                let org_id = org.org_id.as_deref().unwrap_or("<unknown-id>");
+                let org_slug = org.org_slug.as_deref().unwrap_or("<unknown-slug>");
+                let org_name = org.org_name.as_deref().unwrap_or("<unknown-name>");
+                let role = org.role.as_deref().unwrap_or("<unknown-role>");
+                writeln!(
+                    out,
+                    "    - {} ({}) [{}] role={}",
+                    org_slug, org_name, org_id, role
+                )
+                .unwrap();
+            }
         }
+        writeln!(out).unwrap();
     }
-    writeln!(out).unwrap();
 
-    writeln!(out, "Telemetry and metrics").unwrap();
+    writeln!(out, "Telemetry status").unwrap();
     writeln!(
         out,
         "  Metrics delivery: {}",
@@ -335,9 +337,11 @@ mod tests {
         assert!(output.contains("API access: connected via API key"));
         assert!(output.contains("API key: connected (gita...7890)"));
         assert!(output.contains("Login: not connected"));
-        assert!(output.contains(
-            "Author identity header (X-Author-Identity): Alice Example <alice@example.com>"
-        ));
+        assert!(output.contains("Identity: Alice Example <alice@example.com>"));
+        assert!(!output.contains("Author identity header"));
+        assert!(!output.contains("Login identity"));
+        assert!(output.contains("Telemetry status"));
+        assert!(!output.contains("Telemetry and metrics"));
         assert!(output.contains("Metrics delivery: on (API key configured)"));
     }
 
@@ -366,9 +370,13 @@ mod tests {
         let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), true);
 
         assert!(output.contains("API access: connected via login"));
-        assert!(output.contains("Author identity header (X-Author-Identity): not sent"));
+        assert!(output.contains("Identity: not sent"));
+        assert!(!output.contains("Author identity header"));
+        assert!(output.contains("Login identity"));
         assert!(output.contains("Email: user@example.com"));
         assert!(output.contains("- acme (Acme) [org-123] role=owner"));
+        assert!(output.contains("Telemetry status"));
+        assert!(!output.contains("Telemetry and metrics"));
         assert!(output.contains("OSS diagnostic telemetry: off"));
         assert!(output.contains("Events: 12 total, 8 delivered, 4 not delivered"));
         assert!(output.contains("Rows with sync errors: 1"));
