@@ -1053,16 +1053,49 @@ fn apply_pull_notes_sync_side_effect(
     command: Option<&str>,
     args: &[String],
 ) -> Result<(), GitAiError> {
+    use crate::config::NotesBackendKind;
+
     let repo = find_repository_in_path(worktree)?;
     let parsed = parsed_invocation_for_side_effect(command, args);
     let remote = fetch_remote_from_args(&repo, &parsed)?;
+    let notes_backend = crate::config::Config::fresh().notes_backend_kind();
+
+    tracing::info!(
+        command = command.unwrap_or("pull"),
+        remote = %remote,
+        backend = %notes_backend,
+        worktree = %worktree,
+        "handling pull notes sync"
+    );
+
+    if notes_backend == NotesBackendKind::Http {
+        return crate::git::notes_api::warm_cache_for_remote(&repo, &remote);
+    }
+
     fetch_authorship_notes(&repo, &remote)?;
     Ok(())
 }
 
 fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> {
+    use crate::config::NotesBackendKind;
+
     let repo = find_repository_in_path(worktree)?;
-    fetch_authorship_notes(&repo, "origin")?;
+    let remote = "origin";
+    let notes_backend = crate::config::Config::fresh().notes_backend_kind();
+
+    tracing::info!(
+        command = "clone",
+        remote = %remote,
+        backend = %notes_backend,
+        worktree = %worktree,
+        "handling clone notes sync"
+    );
+
+    if notes_backend == NotesBackendKind::Http {
+        return crate::git::notes_api::warm_cache_for_remote(&repo, remote);
+    }
+
+    fetch_authorship_notes(&repo, remote)?;
     Ok(())
 }
 
@@ -6219,7 +6252,8 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
                 tracing_subscriber::fmt::layer()
                     .with_target(false)
                     .with_thread_ids(false)
-                    .with_ansi(false),
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr),
             )
             .with(crate::daemon::sentry_layer::SentryLayer)
             .init();
