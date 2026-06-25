@@ -2,12 +2,13 @@ use crate::authorship::authorship_log::{LineRange, SessionRecord};
 use crate::authorship::authorship_log_serialization::{
     AuthorshipLog, generate_session_id, generate_trace_id,
 };
-use crate::authorship::working_log::CheckpointKind;
+use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint_agent::bash_tool::StatEntry;
 use crate::daemon::bash_history_db::{BashCheckpointCall, distance_to_call_window};
 use crate::error::GitAiError;
 use crate::git::repo_state::worktree_root_for_path;
 use crate::git::repository::Repository;
+use crate::metrics::db::SessionEventRecoveryCandidate;
 use crate::metrics::{CheckpointValues, EventAttributes, MetricEvent, PosEncoded};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -17,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const BASH_RECOVERY_COARSE_TIMESTAMP_NS: u128 = 1_000_000_000;
+const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 
 pub(crate) type FileTimestampsByPath = HashMap<String, Vec<u128>>;
@@ -39,6 +41,15 @@ pub(crate) fn recover_attribution(
     }
 
     recover_bash_mtime(
+        repo,
+        parent_sha,
+        commit_sha,
+        human_author,
+        authorship_log,
+        committed_hunks,
+        file_timestamps,
+    )?;
+    recover_session_event_mtime(
         repo,
         parent_sha,
         commit_sha,
@@ -166,6 +177,122 @@ fn recover_bash_mtime(
             recovered_line_count: unknown_lines.len() as u32,
             metadata,
             event_ts: Some((candidate.start_time_ns / 1_000_000_000) as u32),
+        });
+    }
+
+    Ok(())
+}
+
+fn recover_session_event_mtime(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    human_author: &str,
+    authorship_log: &mut AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+    captured_file_timestamps: Option<&FileTimestampsByPath>,
+) -> Result<(), GitAiError> {
+    let workdir = repo.workdir()?;
+    let unknown_by_file = unknown_lines_by_file(authorship_log, committed_hunks);
+    if unknown_by_file.is_empty() {
+        return Ok(());
+    }
+
+    let mut timestamps_by_file = HashMap::new();
+    let mut all_timestamps = Vec::new();
+    for file_path in unknown_by_file.keys() {
+        let timestamps = captured_file_timestamps
+            .and_then(|timestamps| timestamps.get(file_path))
+            .filter(|timestamps| !timestamps.is_empty())
+            .cloned()
+            .unwrap_or_else(|| file_timestamps_ns(&workdir, file_path));
+        if !timestamps.is_empty() {
+            all_timestamps.extend(timestamps.iter().copied());
+            timestamps_by_file.insert(file_path.clone(), timestamps);
+        }
+    }
+    if all_timestamps.is_empty() {
+        return Ok(());
+    }
+    all_timestamps.sort_unstable();
+    all_timestamps.dedup();
+
+    let candidates = match crate::metrics::db::MetricsDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(db) => db.session_event_candidates_near_timestamps(
+                &all_timestamps,
+                SESSION_EVENT_RECOVERY_WINDOW_NS,
+            )?,
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let target_repo_url = crate::repo_url::resolve_repo_url_from_repo(repo);
+    let mut existing_commit_sessions = existing_commit_session_ids(authorship_log);
+    for (file_path, unknown_lines) in unknown_by_file {
+        let Some(timestamps) = timestamps_by_file.get(&file_path) else {
+            continue;
+        };
+        let Some(selection) = select_best_session_event_candidate(
+            &candidates,
+            timestamps,
+            &existing_commit_sessions,
+            target_repo_url.as_deref(),
+        ) else {
+            continue;
+        };
+        if selection.distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
+            continue;
+        }
+
+        let candidate = selection.candidate;
+        let trace_id = generate_trace_id();
+        let author_id = format!("{}::{}", candidate.session_id, trace_id);
+        insert_session_event_record(authorship_log, candidate, human_author);
+        add_attestation(authorship_log, &file_path, &author_id, &unknown_lines);
+        existing_commit_sessions.insert(candidate.session_id.clone());
+
+        let selected_model = session_event_model(candidate);
+        let metadata = json!({
+            "solver": "session_event_mtime",
+            "file_path": file_path.as_str(),
+            "unknown_lines": &unknown_lines,
+            "file_timestamps_ns": timestamps,
+            "selected_metric_row_id": candidate.row_id,
+            "selected_event_ts": candidate.event_ts,
+            "selected_session_id": candidate.session_id.as_str(),
+            "selected_external_session_id": candidate.external_session_id.as_str(),
+            "selected_external_tool_use_id": candidate.external_tool_use_id.as_deref(),
+            "selected_tool": candidate.tool.as_str(),
+            "selected_model": selected_model.as_str(),
+            "selected_repo_url": candidate.repo_url.as_deref(),
+            "target_repo_url": target_repo_url.as_deref(),
+            "distance_ns": selection.distance_ns,
+            "window_ns": SESSION_EVENT_RECOVERY_WINDOW_NS,
+            "selection_tier": selection.tier.as_str(),
+            "candidate_count": candidates.len(),
+        });
+        record_recovery_metric(RecoveryMetricInput {
+            repo,
+            parent_sha,
+            commit_sha,
+            file_path: &file_path,
+            author_id: &author_id,
+            session_id: &candidate.session_id,
+            trace_id: &trace_id,
+            tool: &candidate.tool,
+            model: &selected_model,
+            external_session_id: &candidate.external_session_id,
+            external_tool_use_id: candidate.external_tool_use_id.as_deref(),
+            edit_kind: "attribution_recovery_session_event",
+            checkpoint_type: "recovered_session_event_mtime",
+            recovered_line_count: unknown_lines.len() as u32,
+            metadata,
+            event_ts: Some(candidate.event_ts),
         });
     }
 
@@ -379,6 +506,132 @@ fn bash_candidate_session_id(candidate: &BashCheckpointCall) -> String {
     generate_session_id(&candidate.agent_id.id, &candidate.agent_id.tool)
 }
 
+fn select_best_session_event_candidate<'a>(
+    candidates: &'a [SessionEventRecoveryCandidate],
+    timestamps: &[u128],
+    existing_commit_sessions: &HashSet<String>,
+    target_repo_url: Option<&str>,
+) -> Option<SessionEventCandidateSelection<'a>> {
+    let matching_candidates = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let distance_ns = session_event_distance(candidate, timestamps)?;
+            if distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
+                return None;
+            }
+            Some((candidate, distance_ns))
+        })
+        .collect::<Vec<_>>();
+    if matching_candidates.is_empty() {
+        return None;
+    }
+
+    let any_repo_url = matching_candidates
+        .iter()
+        .any(|(candidate, _)| candidate.repo_url.is_some());
+    let time_only_session_count = matching_candidates
+        .iter()
+        .filter(|(candidate, _)| candidate.repo_url.is_none())
+        .map(|(candidate, _)| candidate.session_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+
+    matching_candidates
+        .into_iter()
+        .filter_map(|(candidate, distance_ns)| {
+            let tier = session_event_candidate_tier(
+                candidate,
+                existing_commit_sessions,
+                target_repo_url,
+                any_repo_url,
+                time_only_session_count,
+            )?;
+            Some(SessionEventCandidateSelection {
+                candidate,
+                distance_ns,
+                tier,
+            })
+        })
+        .min_by(|left, right| {
+            left.tier
+                .score()
+                .cmp(&right.tier.score())
+                .then_with(|| left.distance_ns.cmp(&right.distance_ns))
+                .then_with(|| right.candidate.row_id.cmp(&left.candidate.row_id))
+        })
+}
+
+struct SessionEventCandidateSelection<'a> {
+    candidate: &'a SessionEventRecoveryCandidate,
+    distance_ns: u128,
+    tier: SessionEventCandidateTier,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionEventCandidateTier {
+    SameRepoUrl,
+    ExistingCommitSession,
+    TimeOnlyUnambiguous,
+}
+
+impl SessionEventCandidateTier {
+    fn score(self) -> u8 {
+        match self {
+            Self::SameRepoUrl => 0,
+            Self::ExistingCommitSession => 1,
+            Self::TimeOnlyUnambiguous => 2,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SameRepoUrl => "same_repo_url",
+            Self::ExistingCommitSession => "existing_commit_session",
+            Self::TimeOnlyUnambiguous => "time_only_unambiguous",
+        }
+    }
+}
+
+fn session_event_candidate_tier(
+    candidate: &SessionEventRecoveryCandidate,
+    existing_commit_sessions: &HashSet<String>,
+    target_repo_url: Option<&str>,
+    any_repo_url: bool,
+    time_only_session_count: usize,
+) -> Option<SessionEventCandidateTier> {
+    if let (Some(target_repo_url), Some(candidate_repo_url)) =
+        (target_repo_url, candidate.repo_url.as_deref())
+    {
+        return (candidate_repo_url == target_repo_url)
+            .then_some(SessionEventCandidateTier::SameRepoUrl);
+    }
+
+    if candidate.repo_url.is_some() {
+        return None;
+    }
+
+    if existing_commit_sessions.contains(&candidate.session_id) {
+        return Some(SessionEventCandidateTier::ExistingCommitSession);
+    }
+
+    if !any_repo_url && time_only_session_count == 1 {
+        return Some(SessionEventCandidateTier::TimeOnlyUnambiguous);
+    }
+
+    None
+}
+
+fn session_event_distance(
+    candidate: &SessionEventRecoveryCandidate,
+    timestamps: &[u128],
+) -> Option<u128> {
+    let event_ns = candidate.event_ts as u128 * 1_000_000_000;
+    timestamps
+        .iter()
+        .map(|timestamp_ns| timestamp_ns.abs_diff(event_ns))
+        .min()
+}
+
 fn recovery_distance_to_call_window(timestamp_ns: u128, call: &BashCheckpointCall) -> Option<u128> {
     let start = call.start_time_ns;
     let end = call
@@ -441,6 +694,34 @@ fn insert_session_record(
             human_author: Some(human_author.to_string()),
             custom_attributes: None,
         });
+}
+
+fn insert_session_event_record(
+    authorship_log: &mut AuthorshipLog,
+    candidate: &SessionEventRecoveryCandidate,
+    human_author: &str,
+) {
+    authorship_log
+        .metadata
+        .sessions
+        .entry(candidate.session_id.clone())
+        .or_insert_with(|| SessionRecord {
+            agent_id: AgentId {
+                tool: candidate.tool.clone(),
+                id: candidate.external_session_id.clone(),
+                model: session_event_model(candidate),
+            },
+            human_author: Some(human_author.to_string()),
+            custom_attributes: None,
+        });
+}
+
+fn session_event_model(candidate: &SessionEventRecoveryCandidate) -> String {
+    candidate
+        .model
+        .clone()
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn unknown_lines_by_file(
@@ -752,6 +1033,26 @@ mod tests {
         }
     }
 
+    fn session_event_candidate(
+        row_id: i64,
+        session_id: &str,
+        external_session_id: &str,
+        event_ts: u32,
+        repo_url: Option<&str>,
+    ) -> crate::metrics::db::SessionEventRecoveryCandidate {
+        crate::metrics::db::SessionEventRecoveryCandidate {
+            row_id,
+            event_ts,
+            session_id: session_id.to_string(),
+            trace_id: Some(format!("trace-{row_id}")),
+            tool: "codex".to_string(),
+            model: Some("gpt-5".to_string()),
+            external_session_id: external_session_id.to_string(),
+            external_tool_use_id: Some(format!("tool-use-{row_id}")),
+            repo_url: repo_url.map(ToString::to_string),
+        }
+    }
+
     #[test]
     fn unknown_lines_exclude_existing_attestations() {
         let mut log = AuthorshipLog::new();
@@ -893,6 +1194,59 @@ mod tests {
         assert_eq!(selection.candidate.tool_use_id, "tool-near");
         assert_eq!(selection.tier, BashCandidateTier::TimeOnly);
         assert_eq!(selection.distance_ns, 10);
+    }
+
+    #[test]
+    fn session_event_candidate_ranking_prefers_matching_repo_url() {
+        let timestamp_ns = 1_700_000_001_500_000_000;
+        let candidates = vec![
+            session_event_candidate(
+                1,
+                "s_closer_time_only",
+                "external-closer",
+                1_700_000_001,
+                None,
+            ),
+            session_event_candidate(
+                2,
+                "s_matching_repo",
+                "external-matching",
+                1_700_000_000,
+                Some("https://github.com/acme/repo"),
+            ),
+        ];
+
+        let selection = select_best_session_event_candidate(
+            &candidates,
+            &[timestamp_ns],
+            &HashSet::new(),
+            Some("https://github.com/acme/repo"),
+        )
+        .expect("expected session-event candidate");
+
+        assert_eq!(selection.candidate.session_id, "s_matching_repo");
+        assert_eq!(selection.tier, SessionEventCandidateTier::SameRepoUrl);
+    }
+
+    #[test]
+    fn session_event_candidate_ranking_rejects_ambiguous_time_only_sessions() {
+        let timestamp_ns = 1_700_000_001_500_000_000;
+        let candidates = vec![
+            session_event_candidate(1, "s_first", "external-first", 1_700_000_001, None),
+            session_event_candidate(2, "s_second", "external-second", 1_700_000_002, None),
+        ];
+
+        let selection = select_best_session_event_candidate(
+            &candidates,
+            &[timestamp_ns],
+            &HashSet::new(),
+            Some("https://github.com/acme/repo"),
+        );
+
+        assert!(
+            selection.is_none(),
+            "time-only recovery must not pick between multiple plausible sessions"
+        );
     }
 
     #[test]
