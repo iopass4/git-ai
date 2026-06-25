@@ -2516,22 +2516,51 @@ impl ActorDaemonCoordinator {
         }
     }
 
-    async fn wait_for_session_event_recovery_candidate(
+    fn wait_for_session_event_recovery_candidate(
         &self,
         repo: &Repository,
         commit_sha: &str,
         recovery_file_timestamps: Option<
             &crate::authorship::attribution_recovery::FileTimestampsByPath,
         >,
+        unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile,
     ) {
+        if unknown_by_file.is_empty() {
+            return;
+        }
+        let unknown_files = unknown_by_file
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         let mut timestamps = recovery_file_timestamps
             .map(|recovery_file_timestamps| {
                 recovery_file_timestamps
-                    .values()
-                    .flat_map(|values| values.iter().copied())
+                    .iter()
+                    .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
+                    .flat_map(|(_, values)| values.iter().copied())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        if timestamps.is_empty()
+            && let Ok(workdir) = repo.workdir()
+            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+        {
+            timestamps = fallback_timestamps
+                .iter()
+                .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
+                .flat_map(|(_, values)| values.iter().copied())
+                .collect::<Vec<_>>();
+        }
+        if timestamps.is_empty() {
+            timestamps = recovery_file_timestamps
+                .map(|recovery_file_timestamps| {
+                    recovery_file_timestamps
+                        .values()
+                        .flat_map(|values| values.iter().copied())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        }
         if timestamps.is_empty()
             && let Ok(workdir) = repo.workdir()
             && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
@@ -2569,16 +2598,16 @@ impl ActorDaemonCoordinator {
             crate::daemon::stream_worker::SweepTrigger::PostCommit,
         );
 
-        let deadline = tokio::time::Instant::now() + SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT;
+        let deadline = std::time::Instant::now() + SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT;
         loop {
-            tokio::time::sleep(SESSION_EVENT_RECOVERY_PREFLIGHT_POLL).await;
+            std::thread::sleep(SESSION_EVENT_RECOVERY_PREFLIGHT_POLL);
             if has_candidate() {
                 tracing::debug!(
                     "session-event recovery candidate became visible before post-commit"
                 );
                 return;
             }
-            if tokio::time::Instant::now() >= deadline {
+            if std::time::Instant::now() >= deadline {
                 tracing::debug!(
                     wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
                     "session-event recovery preflight wait expired"
@@ -5246,12 +5275,14 @@ impl ActorDaemonCoordinator {
                                 new_head,
                             )
                             .await;
-                            self.wait_for_session_event_recovery_candidate(
-                                &repo,
-                                new_head,
-                                recovery_file_timestamps.as_ref(),
-                            )
-                            .await;
+                            let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
+                                self.wait_for_session_event_recovery_candidate(
+                                    &repo,
+                                    new_head,
+                                    recovery_file_timestamps.as_ref(),
+                                    unknown_by_file,
+                                );
+                            };
 
                             crate::authorship::post_commit::post_commit_from_working_log_with_recovery_timestamps(
                                 &repo,
@@ -5260,6 +5291,7 @@ impl ActorDaemonCoordinator {
                                 author,
                                 true,
                                 recovery_file_timestamps.as_ref(),
+                                Some(&recovery_preflight),
                             )?;
 
                             if cmd.primary_command.as_deref() == Some("commit")
@@ -5300,18 +5332,21 @@ impl ActorDaemonCoordinator {
                                 new_head,
                             )
                             .await;
-                            self.wait_for_session_event_recovery_candidate(
-                                &repo,
-                                new_head,
-                                recovery_file_timestamps.as_ref(),
-                            )
-                            .await;
+                            let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
+                                self.wait_for_session_event_recovery_candidate(
+                                    &repo,
+                                    new_head,
+                                    recovery_file_timestamps.as_ref(),
+                                    unknown_by_file,
+                                );
+                            };
                             crate::authorship::post_commit::post_commit_amend_with_recovery_timestamps(
                                 &repo,
                                 old_head,
                                 new_head,
                                 author,
                                 recovery_file_timestamps.as_ref(),
+                                Some(&recovery_preflight),
                             )?;
                         }
                     }

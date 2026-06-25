@@ -22,6 +22,13 @@ pub(crate) const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 
 pub(crate) type FileTimestampsByPath = HashMap<String, Vec<u128>>;
+pub(crate) type UnknownLinesByFile = BTreeMap<String, Vec<u32>>;
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AttributionRecoveryContext<'a> {
+    pub(crate) file_timestamps: Option<&'a FileTimestampsByPath>,
+    pub(crate) before_external_recovery: Option<&'a dyn Fn(&UnknownLinesByFile)>,
+}
 
 pub(crate) fn recover_attribution(
     repo: &Repository,
@@ -30,7 +37,7 @@ pub(crate) fn recover_attribution(
     human_author: &str,
     authorship_log: &mut AuthorshipLog,
     committed_hunks: &HashMap<String, Vec<LineRange>>,
-    file_timestamps: Option<&FileTimestampsByPath>,
+    context: AttributionRecoveryContext<'_>,
 ) -> Result<(), GitAiError> {
     if committed_hunks.is_empty() {
         return Ok(());
@@ -40,6 +47,22 @@ pub(crate) fn recover_attribution(
         return Ok(());
     }
 
+    recover_adjacent_edges(
+        repo,
+        parent_sha,
+        commit_sha,
+        authorship_log,
+        committed_hunks,
+    );
+    let unknown_after_edges = unknown_lines_by_file(authorship_log, committed_hunks);
+    if unknown_after_edges.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(before_external_recovery) = context.before_external_recovery {
+        before_external_recovery(&unknown_after_edges);
+    }
+
     recover_session_event_mtime(
         repo,
         parent_sha,
@@ -47,7 +70,7 @@ pub(crate) fn recover_attribution(
         human_author,
         authorship_log,
         committed_hunks,
-        file_timestamps,
+        context.file_timestamps,
     )?;
     recover_bash_mtime(
         repo,
@@ -56,15 +79,8 @@ pub(crate) fn recover_attribution(
         human_author,
         authorship_log,
         committed_hunks,
-        file_timestamps,
+        context.file_timestamps,
     )?;
-    recover_adjacent_edges(
-        repo,
-        parent_sha,
-        commit_sha,
-        authorship_log,
-        committed_hunks,
-    );
     Ok(())
 }
 
@@ -699,7 +715,7 @@ fn session_event_model(candidate: &SessionEventRecoveryCandidate) -> String {
 fn unknown_lines_by_file(
     authorship_log: &AuthorshipLog,
     committed_hunks: &HashMap<String, Vec<LineRange>>,
-) -> BTreeMap<String, Vec<u32>> {
+) -> UnknownLinesByFile {
     let covered = covered_lines_by_file(authorship_log);
     let mut result = BTreeMap::new();
     for (file_path, ranges) in committed_hunks {
